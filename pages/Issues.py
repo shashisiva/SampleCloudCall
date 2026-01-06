@@ -1,9 +1,21 @@
 import streamlit as st
 import datetime as dt
+import pandas as pd
+from storage import add_issue, save_uploaded_image
+import requests
 
 
 
 st.title("📝 Disaster Issue Reporter")
+
+API_URL = "http://127.0.0.1:8000/moderate"  # change if your API runs elsewhere
+
+def get_toxicity_score(text: str):
+    r = requests.post(API_URL, json={"text": text}, timeout=10)
+    r.raise_for_status()
+    data = r.json()
+    return data.get("toxicity_score"), data.get("decision")
+    
 
 category = st.selectbox(        "Category",
         ["flood", "rain", "cyclone", "tsunami", "other", "wind", "fire"]
@@ -24,10 +36,17 @@ province_to_districts = {
 province = st.selectbox("Province", list(province_to_districts.keys()))
 district = st.selectbox("District", province_to_districts[province])
 
-description = st.text_input(
+description = st.text_area(
         "Disaster Issue Description (max 100 characters)",
-        max_chars=100
+        max_chars=100,
+        height=180,
     )
+
+uploaded_file = st.file_uploader(
+    "Upload Image", type=["jpg","jpeg","png","JPG","JPEG","PNG"]
+)
+if uploaded_file:
+    st.image(uploaded_file)
 
     # Date/time (not in the future)
 now = dt.datetime.now()
@@ -53,9 +72,13 @@ if st.session_state["incident_date"] == now_date and st.session_state["incident_
         st.session_state["incident_time"] = now_time
 
 if st.button("Submit"):
-        if not description.strip():
-            st.error("Please enter an issue description.")
-        else:
+    desc = description.strip()
+
+    if not desc:
+        st.error("Please enter an issue description.")
+    else:
+        try:
+            # build incident datetime first
             incident_datetime = dt.datetime.combine(
                 st.session_state["incident_date"],
                 st.session_state["incident_time"]
@@ -64,9 +87,37 @@ if st.button("Submit"):
             if incident_datetime > now:
                 st.error("Incident date/time cannot be in the future.")
             else:
-                st.success("Submitted!")
-                st.write("**Category:**", category)
-                st.write("**Province:**", province)
-                st.write("**District:**", district)
-                st.write("**Incident Date/Time:**", incident_datetime.strftime("%Y-%m-%d %H:%M"))
-                st.write("**Description:**", description)
+                # call moderation API only when validation passes
+                score, decision = get_toxicity_score(desc)
+
+                # save image (only after validations)
+                image_path = save_uploaded_image(uploaded_file)
+
+                issue = {
+                    "id": dt.datetime.now().strftime("%Y%m%d%H%M%S"),
+                    "category": category,
+                    "province": province,
+                    "district": district,
+                    "description": desc,
+                    "incident_datetime": incident_datetime.isoformat(timespec="minutes"),
+                    "created_at": dt.datetime.now().isoformat(timespec="seconds"),
+                    "image_path": image_path,
+                    "toxicity_score": score,
+                    "toxicity_decision": decision,
+                }
+
+                if decision != "rejected":
+                    add_issue(issue)
+                    st.success("Saved")
+
+                    st.write("---")
+                    st.write("### Moderation result")
+                    st.write("**Toxicity score:**", score)
+                    st.write("**Decision:**", decision)
+
+                else:
+                    st.error(f"Issue description rejected by moderation. Toxicity score: {score}")
+
+        except Exception as e:
+            st.error(f"Moderation API error: {e}")
+
